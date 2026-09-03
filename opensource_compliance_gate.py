@@ -1,4 +1,4 @@
-# v0.1.0
+# v0.1.1
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 from genlayer import *
@@ -9,30 +9,50 @@ import typing
 
 class OpenSourceComplianceGate(gl.Contract):
     """
-    Open-source release compliance gate built for GenLayer.
+    Source-grounded open-source license compliance gate for GenLayer.
 
-    The contract evaluates the actual source and license evidence
-    contained in a pinned GitHub repository commit.
+    The contract registers a public GitHub repository and a license policy.
+    A maintainer can submit a specific immutable commit for review.
 
-    GenLayer validators independently retrieve the same pinned
-    repository evidence and independently perform the compliance
-    analysis before consensus is reached.
+    During review, GenLayer validators independently:
 
-    Decision states:
+        1. Retrieve license evidence from the pinned GitHub commit.
+        2. Retrieve supporting project metadata from the same commit.
+        3. Analyze the retrieved evidence against the configured policy.
+        4. Produce a structured compliance decision.
+        5. Reach consensus through GenLayer's non-deterministic
+           execution and equivalence validation.
 
-        READY_FOR_REVIEW
-        UNDER_REVIEW
+    Possible review outcomes:
+
         COMPLIANT
         NON_COMPLIANT
         HUMAN_REVIEW
 
-    The contract is designed to be reusable across multiple
-    software releases and projects.
+    Lifecycle:
+
+        READY_FOR_REVIEW
+            |
+            v
+        UNDER_REVIEW
+          / | \
+         /  |  \
+        v   v   v
+    COMPLIANT
+    NON_COMPLIANT
+    HUMAN_REVIEW
+         |
+         v
+    READY_FOR_REVIEW
+
+    The repository URL and project policy remain fixed after deployment.
+    Each release is identified by an immutable Git commit SHA.
     """
 
-    # ------------------------------------------------------------------
-    # Persistent contract state
-    # ------------------------------------------------------------------
+
+    # ==============================================================
+    # Persistent state
+    # ==============================================================
 
     repository_url: str
     project_license_policy: str
@@ -55,9 +75,10 @@ class OpenSourceComplianceGate(gl.Contract):
     review_count: u32
     last_reviewed_commit: str
 
-    # ------------------------------------------------------------------
+
+    # ==============================================================
     # Constructor
-    # ------------------------------------------------------------------
+    # ==============================================================
 
     def __init__(
         self,
@@ -66,15 +87,7 @@ class OpenSourceComplianceGate(gl.Contract):
         maintainer_address: str
     ):
         """
-        Register a GitHub repository and its release compliance policy.
-
-        Example repository:
-            https://github.com/owner/repository
-
-        Example policy:
-            Allow permissive licenses such as MIT, Apache-2.0,
-            BSD-2-Clause and BSD-3-Clause. Copyleft licenses such
-            as GPL or AGPL require human review before release.
+        Register the repository, license policy and authorized maintainer.
         """
 
         if not repository_url.strip():
@@ -86,7 +99,7 @@ class OpenSourceComplianceGate(gl.Contract):
             "https://github.com/"
         ):
             raise gl.vm.UserError(
-                "Repository must use a public GitHub HTTPS URL."
+                "Repository must be a public GitHub HTTPS URL."
             )
 
         if not project_license_policy.strip():
@@ -100,8 +113,8 @@ class OpenSourceComplianceGate(gl.Contract):
             )
 
         self.repository_url = repository_url.rstrip("/")
-        self.project_license_policy = project_license_policy
-        self.maintainer = maintainer_address
+        self.project_license_policy = project_license_policy.strip()
+        self.maintainer = maintainer_address.strip()
 
         self.current_commit = ""
         self.current_release = ""
@@ -123,27 +136,33 @@ class OpenSourceComplianceGate(gl.Contract):
         self.review_count = 0
         self.last_reviewed_commit = ""
 
-    # ------------------------------------------------------------------
-    # Internal authorization helper
-    # ------------------------------------------------------------------
+
+    # ==============================================================
+    # Authorization
+    # ==============================================================
 
     def _require_maintainer(self) -> None:
         """
-        Restrict lifecycle-changing operations to the registered
-        maintainer.
+        Only the configured maintainer may change the review lifecycle.
         """
 
-        caller = str(gl.message.sender_address).lower()
-        expected = str(self.maintainer).lower()
+        caller = str(
+            gl.message.sender_address
+        ).lower()
+
+        expected = str(
+            self.maintainer
+        ).lower()
 
         if caller != expected:
             raise gl.vm.UserError(
                 "Only the registered maintainer can perform this action."
             )
 
-    # ------------------------------------------------------------------
-    # GitHub URL helper
-    # ------------------------------------------------------------------
+
+    # ==============================================================
+    # GitHub URL construction
+    # ==============================================================
 
     def _build_raw_url(
         self,
@@ -151,32 +170,35 @@ class OpenSourceComplianceGate(gl.Contract):
         commit: str
     ) -> str:
         """
-        Convert:
+        Build an immutable raw GitHub URL.
 
+        Example:
+
+        Repository:
             https://github.com/owner/repository
 
-        into:
+        Commit:
+            abc123...
 
-            https://raw.githubusercontent.com/owner/repository/
-            <commit>/<path>
+        File:
+            LICENSE
 
-        The commit SHA pins the evidence to an immutable repository
-        version.
+        Result:
+
+        https://raw.githubusercontent.com/owner/repository/
+        abc123.../LICENSE
         """
 
-        base = self.repository_url
+        prefix = "https://github.com/"
 
-        if base.endswith("/"):
-            base = base[:-1]
+        base = self.repository_url.rstrip("/")
 
-        github_prefix = "https://github.com/"
-
-        if not base.startswith(github_prefix):
+        if not base.startswith(prefix):
             raise gl.vm.UserError(
                 "Invalid GitHub repository URL."
             )
 
-        repository_path = base[len(github_prefix):]
+        repository_path = base[len(prefix):]
 
         return (
             "https://raw.githubusercontent.com/"
@@ -187,9 +209,10 @@ class OpenSourceComplianceGate(gl.Contract):
             + path
         )
 
-    # ------------------------------------------------------------------
-    # Submit release
-    # ------------------------------------------------------------------
+
+    # ==============================================================
+    # Release submission
+    # ==============================================================
 
     @gl.public.write
     def submit_release(
@@ -198,20 +221,19 @@ class OpenSourceComplianceGate(gl.Contract):
         source_commit: str
     ) -> typing.Any:
         """
-        Submit a specific repository commit for compliance review.
+        Submit an immutable repository commit for compliance review.
 
-        Only the maintainer may submit a release.
+        Only the registered maintainer may submit a release.
 
-        The commit SHA is stored before the non-deterministic
-        verification begins, so the exact source version being
-        evaluated is explicit.
+        The commit SHA is stored before the review begins so that all
+        validators evaluate the same repository version.
         """
 
         self._require_maintainer()
 
         if self.current_status == "UNDER_REVIEW":
             raise gl.vm.UserError(
-                "A release is already undergoing compliance review."
+                "A compliance review is already in progress."
             )
 
         if not release_label.strip():
@@ -224,13 +246,15 @@ class OpenSourceComplianceGate(gl.Contract):
                 "Source commit cannot be empty."
             )
 
-        if len(source_commit.strip()) < 7:
+        commit = source_commit.strip()
+
+        if len(commit) < 7:
             raise gl.vm.UserError(
                 "Source commit must contain a valid commit identifier."
             )
 
         self.current_release = release_label.strip()
-        self.current_commit = source_commit.strip()
+        self.current_commit = commit
 
         self.current_status = "UNDER_REVIEW"
         self.has_resolved = False
@@ -241,8 +265,7 @@ class OpenSourceComplianceGate(gl.Contract):
         self.license_risk = ""
 
         self.evidence_summary = (
-            "Release submitted. Awaiting independent source-grounded "
-            "compliance verification."
+            "Release submitted for source-grounded compliance review."
         )
 
         self.decision_summary = ""
@@ -253,222 +276,254 @@ class OpenSourceComplianceGate(gl.Contract):
             "commit": self.current_commit
         }
 
-    # ------------------------------------------------------------------
-    # Source-grounded compliance review
-    # ------------------------------------------------------------------
 
-    @gl.public.write
-    def review_release(self) -> typing.Any:
+    # ==============================================================
+    # Source retrieval and analysis
+    # ==============================================================
+
+    def _collect_and_analyze(
+        self,
+        repository: str,
+        commit: str,
+        policy: str,
+        release: str
+    ) -> typing.Any:
         """
-        Retrieve the pinned repository source and perform a
-        decentralized compliance analysis.
+        Retrieve pinned repository evidence and perform the
+        non-deterministic compliance analysis.
 
-        Validators independently execute the same source retrieval
-        and analysis. They must agree on the substantive decision,
-        risk classification and evidence availability.
+        This function is intentionally self-contained so that
+        validators can independently reproduce the evidence
+        retrieval and reasoning process.
         """
 
-        self._require_maintainer()
+        # ----------------------------------------------------------
+        # License evidence
+        # ----------------------------------------------------------
 
-        if self.current_status != "UNDER_REVIEW":
-            raise gl.vm.UserError(
-                "No release is currently awaiting compliance review."
+        license_paths = [
+            "LICENSE",
+            "LICENSE.md",
+            "LICENSE.txt",
+            "COPYING",
+            "COPYING.md"
+        ]
+
+        license_evidence = []
+
+        for path in license_paths:
+
+            url = self._build_raw_url(
+                path,
+                commit
             )
 
-        repository = self.repository_url
-        commit = self.current_commit
-        policy = self.project_license_policy
-        release = self.current_release
+            try:
+                response = gl.nondet.web.get(url)
 
-        def collect_and_analyze() -> typing.Any:
-            """
-            Non-deterministic evidence collection and analysis.
+                if response.status_code == 200:
 
-            Every validator independently executes this function.
-            """
-
-            # ----------------------------------------------------------
-            # Candidate license files
-            # ----------------------------------------------------------
-
-            license_paths = [
-                "LICENSE",
-                "LICENSE.md",
-                "LICENSE.txt",
-                "COPYING",
-                "COPYING.md"
-            ]
-
-            license_evidence = []
-
-            for path in license_paths:
-                url = self._build_raw_url(
-                    path,
-                    commit
-                )
-
-                try:
-                    response = gl.nondet.web.get(url)
-
-                    if response.status_code == 200:
-                        body = response.body.decode("utf-8")
-
-                        if body.strip():
-                            # Keep evidence bounded so the LLM input
-                            # remains practical.
-                            license_evidence.append(
-                                "FILE: "
-                                + path
-                                + "\n"
-                                + body[:12000]
-                            )
-                except Exception:
-                    # A missing/unavailable candidate file is not
-                    # automatically treated as compliance.
-                    pass
-
-            # ----------------------------------------------------------
-            # Common project metadata files
-            # ----------------------------------------------------------
-
-            metadata_paths = [
-                "pyproject.toml",
-                "package.json",
-                "Cargo.toml",
-                "go.mod",
-                "README.md"
-            ]
-
-            metadata_evidence = []
-
-            for path in metadata_paths:
-                url = self._build_raw_url(
-                    path,
-                    commit
-                )
-
-                try:
-                    response = gl.nondet.web.get(url)
-
-                    if response.status_code == 200:
-                        body = response.body.decode("utf-8")
-
-                        if body.strip():
-                            metadata_evidence.append(
-                                "FILE: "
-                                + path
-                                + "\n"
-                                + body[:10000]
-                            )
-                except Exception:
-                    pass
-
-            # ----------------------------------------------------------
-            # Evidence requirement
-            # ----------------------------------------------------------
-
-            if len(license_evidence) == 0:
-                return {
-                    "decision": "HUMAN_REVIEW",
-                    "score": 0,
-                    "risk": "UNKNOWN",
-                    "license": "UNDETERMINED",
-                    "evidence_found": False,
-                    "summary": (
-                        "No recognized license file could be retrieved "
-                        "from the pinned repository commit."
+                    body = response.body.decode(
+                        "utf-8"
                     )
-                }
 
-            license_text = "\n\n--- LICENSE EVIDENCE ---\n".join(
-                license_evidence
+                    if body.strip():
+
+                        license_evidence.append(
+                            "FILE: "
+                            + path
+                            + "\n"
+                            + body[:12000]
+                        )
+
+            except Exception:
+                pass
+
+
+        # ----------------------------------------------------------
+        # Supporting project metadata
+        # ----------------------------------------------------------
+
+        metadata_paths = [
+            "README.md",
+            "pyproject.toml",
+            "package.json",
+            "Cargo.toml",
+            "go.mod"
+        ]
+
+        metadata_evidence = []
+
+        for path in metadata_paths:
+
+            url = self._build_raw_url(
+                path,
+                commit
             )
 
-            metadata_text = "\n\n--- PROJECT METADATA ---\n".join(
-                metadata_evidence
-            )
+            try:
+                response = gl.nondet.web.get(url)
 
-            # ----------------------------------------------------------
-            # Source-grounded AI analysis
-            # ----------------------------------------------------------
+                if response.status_code == 200:
 
-            task = f"""
-You are a decentralized software release compliance analyst.
+                    body = response.body.decode(
+                        "utf-8"
+                    )
 
-You must determine whether a software release satisfies the
-license policy supplied by the project maintainer.
+                    if body.strip():
 
-IMPORTANT SOURCE RULES:
+                        metadata_evidence.append(
+                            "FILE: "
+                            + path
+                            + "\n"
+                            + body[:10000]
+                        )
 
-1. Base your decision ONLY on the repository evidence supplied
-   below.
+            except Exception:
+                pass
 
-2. Do NOT assume a license merely from the repository name,
-   filename, project name, or programming language.
 
-3. Do NOT invent licenses for dependencies when their actual
-   license evidence is not present.
+        # ----------------------------------------------------------
+        # No license evidence
+        # ----------------------------------------------------------
 
-4. If the available evidence is insufficient to determine
-   compliance reliably, return HUMAN_REVIEW.
+        if len(license_evidence) == 0:
 
-5. The source commit is pinned and must be treated as the exact
-   release being reviewed.
+            return {
+                "decision": "HUMAN_REVIEW",
+                "score": 0,
+                "risk": "UNKNOWN",
+                "license": "UNDETERMINED",
+                "evidence_found": False,
+                "summary": (
+                    "No recognized license file could be retrieved "
+                    "from the pinned repository commit."
+                )
+            }
 
-PROJECT:
+
+        license_text = (
+            "\n\n--- LICENSE FILE ---\n"
+            .join(license_evidence)
+        )
+
+        metadata_text = (
+            "\n\n--- PROJECT METADATA ---\n"
+            .join(metadata_evidence)
+        )
+
+
+        # ----------------------------------------------------------
+        # Source-grounded AI analysis
+        # ----------------------------------------------------------
+
+        task = f"""
+You are a decentralized open-source software compliance analyst.
+
+Evaluate the exact software release represented by the pinned
+GitHub commit below.
+
+You MUST base the decision only on the retrieved repository
+evidence.
+
+Do not invent information.
+
+Do not infer a license merely from the repository name.
+
+Do not assume that a missing license file means a permissive
+license.
+
+Do not use information outside the supplied evidence.
+
+If the evidence is insufficient or contradictory, return
+HUMAN_REVIEW.
+
+--------------------------------------------------
+REPOSITORY
+--------------------------------------------------
+
 {repository}
 
-RELEASE:
+--------------------------------------------------
+RELEASE
+--------------------------------------------------
+
 {release}
 
-PINNED COMMIT:
+--------------------------------------------------
+PINNED COMMIT
+--------------------------------------------------
+
 {commit}
 
-MAINTAINER LICENSE POLICY:
+--------------------------------------------------
+MAINTAINER LICENSE POLICY
+--------------------------------------------------
+
 {policy}
 
-ACTUAL LICENSE FILE EVIDENCE:
+--------------------------------------------------
+LICENSE EVIDENCE
+--------------------------------------------------
+
 {license_text}
 
-PROJECT METADATA EVIDENCE:
+--------------------------------------------------
+PROJECT METADATA
+--------------------------------------------------
+
 {metadata_text}
 
-DECISION RULES:
+--------------------------------------------------
+DECISION RULES
+--------------------------------------------------
 
 COMPLIANT:
-Use this only when the retrieved evidence clearly identifies
-a license and that license satisfies the maintainer's policy.
+
+Return COMPLIANT only when the retrieved evidence clearly
+identifies a license that satisfies the maintainer's policy.
 
 NON_COMPLIANT:
-Use this only when the retrieved evidence clearly identifies
-a license that violates the stated policy.
+
+Return NON_COMPLIANT only when the retrieved evidence clearly
+identifies a license that violates the maintainer's policy.
 
 HUMAN_REVIEW:
-Use this when:
-- license evidence is contradictory,
-- the license cannot be reliably identified,
-- the policy cannot be applied reliably,
-- evidence is incomplete,
-- or the available source does not justify a confident decision.
 
-SCORING:
+Return HUMAN_REVIEW when:
+
+- license evidence is missing,
+- license evidence is contradictory,
+- license identity is unclear,
+- the policy cannot be reliably applied,
+- or the available evidence does not justify a confident decision.
+
+--------------------------------------------------
+SCORING
+--------------------------------------------------
 
 90-100:
-Clear compliance with strong source evidence.
+Strong and clear compliance evidence.
 
 70-89:
-Likely compliant but some minor uncertainty exists.
+Likely compliant with minor uncertainty.
 
 40-69:
-Material uncertainty or mixed licensing evidence.
+Material uncertainty or mixed evidence.
 
 1-39:
 Strong evidence of non-compliance.
 
 0:
-No sufficient evidence / human review required.
+Insufficient evidence or HUMAN_REVIEW.
 
-Return ONLY valid JSON using exactly this structure:
+--------------------------------------------------
+OUTPUT
+--------------------------------------------------
+
+Return ONLY valid JSON.
+
+Use exactly this structure:
 
 {{
     "decision": "COMPLIANT",
@@ -476,7 +531,7 @@ Return ONLY valid JSON using exactly this structure:
     "risk": "LOW",
     "license": "MIT",
     "evidence_found": true,
-    "summary": "Short factual explanation based only on retrieved evidence."
+    "summary": "The pinned repository evidence identifies MIT and it satisfies the configured policy."
 }}
 
 Allowed decision values:
@@ -492,116 +547,264 @@ MEDIUM
 HIGH
 UNKNOWN
 
+The score must be an integer from 0 to 100.
+
+The evidence_found field must be true or false.
+
 Do not include markdown.
+
 Do not include additional fields.
-Do not provide reasoning outside the JSON object.
+
+Do not provide explanations outside the JSON object.
 """
 
-            try:
-                raw_result = gl.nondet.exec_prompt(task)
+        try:
 
-                cleaned = (
-                    raw_result
-                    .replace("```json", "")
-                    .replace("```", "")
-                    .strip()
-                )
+            raw_result = gl.nondet.exec_prompt(
+                task
+            )
 
-                parsed = json.loads(cleaned)
+            cleaned = (
+                raw_result
+                .replace("```json", "")
+                .replace("```", "")
+                .strip()
+            )
 
-            except Exception:
-                return {
-                    "decision": "HUMAN_REVIEW",
-                    "score": 0,
-                    "risk": "UNKNOWN",
-                    "license": "UNDETERMINED",
-                    "evidence_found": False,
-                    "summary": (
-                        "The compliance analysis could not be "
-                        "reliably parsed."
-                    )
-                }
+            parsed = json.loads(
+                cleaned
+            )
 
-            # ----------------------------------------------------------
-            # Validate result structure
-            # ----------------------------------------------------------
-
-            if not isinstance(parsed, dict):
-                return {
-                    "decision": "HUMAN_REVIEW",
-                    "score": 0,
-                    "risk": "UNKNOWN",
-                    "license": "UNDETERMINED",
-                    "evidence_found": False,
-                    "summary": "Invalid compliance analysis response."
-                }
-
-            decision = parsed.get("decision")
-            score = parsed.get("score")
-            risk = parsed.get("risk")
-            license_name = parsed.get("license")
-            evidence_found = parsed.get("evidence_found")
-            summary = parsed.get("summary")
-
-            if decision not in [
-                "COMPLIANT",
-                "NON_COMPLIANT",
-                "HUMAN_REVIEW"
-            ]:
-                decision = "HUMAN_REVIEW"
-
-            if risk not in [
-                "LOW",
-                "MEDIUM",
-                "HIGH",
-                "UNKNOWN"
-            ]:
-                risk = "UNKNOWN"
-
-            if not isinstance(score, int):
-                score = 0
-
-            if score < 0:
-                score = 0
-
-            if score > 100:
-                score = 100
-
-            if not isinstance(evidence_found, bool):
-                evidence_found = False
-
-            if not isinstance(license_name, str):
-                license_name = "UNDETERMINED"
-
-            if not isinstance(summary, str):
-                summary = "No reliable compliance summary available."
-
-            # Conservative safety rule.
-            if not evidence_found:
-                decision = "HUMAN_REVIEW"
-                risk = "UNKNOWN"
-                score = 0
+        except Exception:
 
             return {
-                "decision": decision,
-                "score": score,
-                "risk": risk,
-                "license": license_name,
-                "evidence_found": evidence_found,
-                "summary": summary[:2000]
+                "decision": "HUMAN_REVIEW",
+                "score": 0,
+                "risk": "UNKNOWN",
+                "license": "UNDETERMINED",
+                "evidence_found": False,
+                "summary": (
+                    "The compliance analysis could not be "
+                    "reliably parsed."
+                )
             }
 
-        # --------------------------------------------------------------
-        # Independent validator consensus
-        # --------------------------------------------------------------
 
-        def validator_fn(leader_result) -> bool:
+        # ----------------------------------------------------------
+        # Validate returned structure
+        # ----------------------------------------------------------
+
+        if not isinstance(
+            parsed,
+            dict
+        ):
+
+            return {
+                "decision": "HUMAN_REVIEW",
+                "score": 0,
+                "risk": "UNKNOWN",
+                "license": "UNDETERMINED",
+                "evidence_found": False,
+                "summary": "Invalid compliance analysis response."
+            }
+
+
+        decision = parsed.get(
+            "decision"
+        )
+
+        score = parsed.get(
+            "score"
+        )
+
+        risk = parsed.get(
+            "risk"
+        )
+
+        license_name = parsed.get(
+            "license"
+        )
+
+        evidence_found = parsed.get(
+            "evidence_found"
+        )
+
+        summary = parsed.get(
+            "summary"
+        )
+
+
+        # ----------------------------------------------------------
+        # Normalize decision
+        # ----------------------------------------------------------
+
+        if decision not in [
+            "COMPLIANT",
+            "NON_COMPLIANT",
+            "HUMAN_REVIEW"
+        ]:
+
+            decision = "HUMAN_REVIEW"
+
+
+        # ----------------------------------------------------------
+        # Normalize risk
+        # ----------------------------------------------------------
+
+        if risk not in [
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+            "UNKNOWN"
+        ]:
+
+            risk = "UNKNOWN"
+
+
+        # ----------------------------------------------------------
+        # Normalize score
+        # ----------------------------------------------------------
+
+        if not isinstance(
+            score,
+            int
+        ):
+
+            score = 0
+
+        if score < 0:
+            score = 0
+
+        if score > 100:
+            score = 100
+
+
+        # ----------------------------------------------------------
+        # Normalize evidence flag
+        # ----------------------------------------------------------
+
+        if not isinstance(
+            evidence_found,
+            bool
+        ):
+
+            evidence_found = False
+
+
+        # ----------------------------------------------------------
+        # Normalize license
+        # ----------------------------------------------------------
+
+        if not isinstance(
+            license_name,
+            str
+        ):
+
+            license_name = "UNDETERMINED"
+
+
+        # ----------------------------------------------------------
+        # Normalize summary
+        # ----------------------------------------------------------
+
+        if not isinstance(
+            summary,
+            str
+        ):
+
+            summary = (
+                "No reliable compliance summary available."
+            )
+
+
+        # ----------------------------------------------------------
+        # Conservative evidence rule
+        # ----------------------------------------------------------
+
+        if not evidence_found:
+
+            decision = "HUMAN_REVIEW"
+            risk = "UNKNOWN"
+            score = 0
+
+        if license_name.strip() == "":
+
+            decision = "HUMAN_REVIEW"
+            risk = "UNKNOWN"
+            score = 0
+
+            license_name = "UNDETERMINED"
+
+
+        return {
+            "decision": decision,
+            "score": score,
+            "risk": risk,
+            "license": license_name.strip(),
+            "evidence_found": evidence_found,
+            "summary": summary[:2000]
+        }
+
+
+    # ==============================================================
+    # Review release
+    # ==============================================================
+
+    @gl.public.write
+    def review_release(self) -> typing.Any:
+        """
+        Execute source-grounded compliance review.
+
+        Only the registered maintainer may start the review.
+
+        Each validator independently retrieves the same pinned
+        repository evidence and evaluates it.
+
+        GenLayer consensus requires substantive agreement on the
+        compliance decision and evidence classification.
+        """
+
+        self._require_maintainer()
+
+        if self.current_status != "UNDER_REVIEW":
+
+            raise gl.vm.UserError(
+                "No release is currently awaiting compliance review."
+            )
+
+
+        repository = self.repository_url
+        commit = self.current_commit
+        policy = self.project_license_policy
+        release = self.current_release
+
+
+        # ----------------------------------------------------------
+        # Leader evaluation
+        # ----------------------------------------------------------
+
+        def leader_evaluation() -> typing.Any:
+
+            return self._collect_and_analyze(
+                repository,
+                commit,
+                policy,
+                release
+            )
+
+
+        # ----------------------------------------------------------
+        # Validator verification
+        # ----------------------------------------------------------
+
+        def validator_fn(
+            leader_result
+        ) -> bool:
             """
-            Validators independently retrieve the same pinned source
-            and independently perform the compliance analysis.
+            Validators independently execute the same evidence
+            collection and analysis.
 
-            The validator does NOT simply check the leader's JSON
-            formatting.
+            They do not simply trust the leader's result.
             """
 
             if not isinstance(
@@ -610,49 +813,63 @@ Do not provide reasoning outside the JSON object.
             ):
                 return False
 
-            leader_data = leader_result.calldata
-
             try:
-                validator_data = collect_and_analyze()
+
+                leader_data = leader_result.calldata
+
+                validator_data = (
+                    self._collect_and_analyze(
+                        repository,
+                        commit,
+                        policy,
+                        release
+                    )
+                )
+
             except Exception:
+
                 return False
 
-            # ----------------------------------------------------------
-            # Decision must match exactly.
-            # ----------------------------------------------------------
+
+            # ------------------------------------------------------
+            # Validate decision
+            # ------------------------------------------------------
 
             if (
                 leader_data.get("decision")
                 != validator_data.get("decision")
             ):
+
                 return False
 
-            # ----------------------------------------------------------
-            # Evidence availability must match.
-            # ----------------------------------------------------------
+
+            # ------------------------------------------------------
+            # Validate evidence availability
+            # ------------------------------------------------------
 
             if (
                 leader_data.get("evidence_found")
                 != validator_data.get("evidence_found")
             ):
+
                 return False
 
-            # ----------------------------------------------------------
-            # Risk classification must match.
-            # ----------------------------------------------------------
+
+            # ------------------------------------------------------
+            # Validate risk classification
+            # ------------------------------------------------------
 
             if (
                 leader_data.get("risk")
                 != validator_data.get("risk")
             ):
+
                 return False
 
-            # ----------------------------------------------------------
-            # License identity should be substantively consistent.
-            #
-            # We compare normalized license strings rather than
-            # free-form summaries.
-            # ----------------------------------------------------------
+
+            # ------------------------------------------------------
+            # Validate normalized license identity
+            # ------------------------------------------------------
 
             leader_license = str(
                 leader_data.get(
@@ -668,61 +885,186 @@ Do not provide reasoning outside the JSON object.
                 )
             ).strip().lower()
 
-            if leader_license != validator_license:
+            if (
+                leader_license
+                != validator_license
+            ):
+
                 return False
 
-            # ----------------------------------------------------------
-            # Scores are subjective, so allow a reasonable tolerance.
-            # A large disagreement should force another validator
-            # rather than silently accepting it.
-            # ----------------------------------------------------------
+
+            # ------------------------------------------------------
+            # Validate score within reasonable tolerance
+            # ------------------------------------------------------
 
             try:
+
                 leader_score = int(
-                    leader_data.get("score", 0)
+                    leader_data.get(
+                        "score",
+                        0
+                    )
                 )
 
                 validator_score = int(
-                    validator_data.get("score", 0)
+                    validator_data.get(
+                        "score",
+                        0
+                    )
                 )
 
-                if abs(
-                    leader_score - validator_score
-                ) > 10:
-                    return False
-
             except Exception:
+
                 return False
+
+
+            if abs(
+                leader_score
+                - validator_score
+            ) > 10:
+
+                return False
+
 
             return True
 
-        # --------------------------------------------------------------
-        # Execute GenLayer consensus.
-        # --------------------------------------------------------------
+
+        # ----------------------------------------------------------
+        # GenLayer non-deterministic consensus
+        # ----------------------------------------------------------
 
         result = gl.vm.run_nondet_unsafe(
-            collect_and_analyze,
+            leader_evaluation,
             validator_fn
         )
 
-        decision = result["decision"]
-        score = result["score"]
-        risk = result["risk"]
-        license_name = result["license"]
-        evidence_found = result["evidence_found"]
-        summary = result["summary"]
 
-        # --------------------------------------------------------------
-        # Deterministic state transition.
-        # --------------------------------------------------------------
+        # ----------------------------------------------------------
+        # Read consensus result
+        # ----------------------------------------------------------
 
-        self.compliance_score = u32(score)
+        decision = result.get(
+            "decision"
+        )
 
-        self.detected_license = license_name
-        self.license_risk = risk
+        score = result.get(
+            "score",
+            0
+        )
+
+        risk = result.get(
+            "risk",
+            "UNKNOWN"
+        )
+
+        license_name = result.get(
+            "license",
+            "UNDETERMINED"
+        )
+
+        evidence_found = result.get(
+            "evidence_found",
+            False
+        )
+
+        summary = result.get(
+            "summary",
+            "No summary available."
+        )
+
+
+        # ----------------------------------------------------------
+        # Defensive normalization
+        # ----------------------------------------------------------
+
+        if decision not in [
+            "COMPLIANT",
+            "NON_COMPLIANT",
+            "HUMAN_REVIEW"
+        ]:
+
+            decision = "HUMAN_REVIEW"
+
+
+        if not isinstance(
+            score,
+            int
+        ):
+
+            score = 0
+
+        if score < 0:
+            score = 0
+
+        if score > 100:
+            score = 100
+
+
+        if risk not in [
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+            "UNKNOWN"
+        ]:
+
+            risk = "UNKNOWN"
+
+
+        if not isinstance(
+            license_name,
+            str
+        ):
+
+            license_name = "UNDETERMINED"
+
+
+        if not isinstance(
+            evidence_found,
+            bool
+        ):
+
+            evidence_found = False
+
+
+        if not isinstance(
+            summary,
+            str
+        ):
+
+            summary = "No reliable summary available."
+
+
+        # ----------------------------------------------------------
+        # Conservative final rule
+        # ----------------------------------------------------------
+
+        if not evidence_found:
+
+            decision = "HUMAN_REVIEW"
+            score = 0
+            risk = "UNKNOWN"
+            license_name = "UNDETERMINED"
+
+
+        # ----------------------------------------------------------
+        # Persist review evidence
+        # ----------------------------------------------------------
+
+        self.compliance_score = u32(
+            score
+        )
+
+        self.detected_license = (
+            license_name
+        )
+
+        self.license_risk = (
+            risk
+        )
 
         self.evidence_summary = (
-            "Pinned commit: "
+            "Source-grounded review completed against pinned "
+            "commit "
             + self.current_commit
             + ". Evidence available: "
             + str(evidence_found)
@@ -731,23 +1073,50 @@ Do not provide reasoning outside the JSON object.
             + "."
         )
 
-        self.decision_summary = summary
+        self.decision_summary = (
+            summary
+        )
 
-        self.review_count = self.review_count + u32(1)
+        self.review_count = (
+            self.review_count
+            + u32(1)
+        )
 
-        self.last_reviewed_commit = self.current_commit
+        self.last_reviewed_commit = (
+            self.current_commit
+        )
+
+
+        # ----------------------------------------------------------
+        # Deterministic state transition
+        # ----------------------------------------------------------
 
         if decision == "COMPLIANT":
-            self.current_status = "COMPLIANT"
+
+            self.current_status = (
+                "COMPLIANT"
+            )
+
             self.has_resolved = True
+
 
         elif decision == "NON_COMPLIANT":
-            self.current_status = "NON_COMPLIANT"
+
+            self.current_status = (
+                "NON_COMPLIANT"
+            )
+
             self.has_resolved = True
 
+
         else:
-            self.current_status = "HUMAN_REVIEW"
+
+            self.current_status = (
+                "HUMAN_REVIEW"
+            )
+
             self.has_resolved = False
+
 
         return {
             "decision": decision,
@@ -757,39 +1126,53 @@ Do not provide reasoning outside the JSON object.
             "evidence_found": evidence_found,
             "summary": summary,
             "status": self.current_status,
+            "release": self.current_release,
             "commit": self.current_commit
         }
 
-    # ------------------------------------------------------------------
-    # Safe retry / reset
-    # ------------------------------------------------------------------
+
+    # ==============================================================
+    # Reset / retry
+    # ==============================================================
 
     @gl.public.write
-    def reset_for_new_release(self) -> typing.Any:
+    def reset_for_new_release(
+        self
+    ) -> typing.Any:
         """
-        Safely return a completed or disputed review to a state where
-        the maintainer can submit another pinned release.
+        Safely reset a completed or disputed review.
 
-        This does NOT modify the repository or policy configuration.
+        Only the maintainer can reset the lifecycle.
+
+        A release currently UNDER_REVIEW cannot be reset.
+
+        The repository, license policy and maintainer remain unchanged.
         """
 
         self._require_maintainer()
 
         if self.current_status == "UNDER_REVIEW":
+
             raise gl.vm.UserError(
                 "Cannot reset while a compliance review is active."
             )
+
 
         if self.current_status not in [
             "COMPLIANT",
             "NON_COMPLIANT",
             "HUMAN_REVIEW"
         ]:
+
             raise gl.vm.UserError(
-                "The contract is already ready for a new release."
+                "The registry is already ready for a new release."
             )
 
-        self.current_status = "READY_FOR_REVIEW"
+
+        self.current_status = (
+            "READY_FOR_REVIEW"
+        )
+
         self.has_resolved = False
 
         self.current_release = ""
@@ -806,24 +1189,26 @@ Do not provide reasoning outside the JSON object.
 
         self.decision_summary = ""
 
+
         return {
             "status": self.current_status,
             "message": (
-                "Contract reset successfully. "
-                "Maintainer may submit a new release."
+                "Compliance registry reset successfully. "
+                "The maintainer can submit another pinned release."
             )
         }
 
-    # ------------------------------------------------------------------
+
+    # ==============================================================
     # Public registry state
-    # ------------------------------------------------------------------
+    # ==============================================================
 
     @gl.public.view
     def get_registry_state(
         self
     ) -> dict[str, typing.Any]:
         """
-        Return the persistent compliance registry state.
+        Return the complete persistent registry state.
         """
 
         return {
@@ -848,16 +1233,17 @@ Do not provide reasoning outside the JSON object.
             "last_reviewed_commit": self.last_reviewed_commit
         }
 
-    # ------------------------------------------------------------------
-    # Public current-review information
-    # ------------------------------------------------------------------
+
+    # ==============================================================
+    # Latest compliance result
+    # ==============================================================
 
     @gl.public.view
     def get_compliance_result(
         self
     ) -> dict[str, typing.Any]:
         """
-        Return the latest compliance result and evidence summary.
+        Return the latest compliance result.
         """
 
         return {
@@ -875,28 +1261,3 @@ Do not provide reasoning outside the JSON object.
             "evidence_summary": self.evidence_summary,
             "decision_summary": self.decision_summary
         }
-
-    # ------------------------------------------------------------------
-    # Future upgrades
-    # ------------------------------------------------------------------
-
-    @gl.public.write
-    def upgrade(
-        self,
-        new_code: bytes
-    ) -> None:
-        """
-        Upgrade the contract code while preserving persistent storage.
-
-        GenLayer's Root storage controls the authorized upgrader list.
-        The upgraded implementation must preserve the existing
-        storage layout.
-        """
-
-        root = gl.storage.Root.get()
-
-        code = root.code.get()
-
-        code.truncate()
-
-        code.extend(new_code)
