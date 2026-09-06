@@ -1,9 +1,8 @@
-# v0.1.1
+# v0.1.2
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 from genlayer import *
 
-import json
 import typing
 
 
@@ -12,7 +11,7 @@ class OpenSourceComplianceGate(gl.Contract):
     Source-grounded open-source license compliance gate for GenLayer.
 
     The contract registers a public GitHub repository and a license policy.
-    A maintainer can submit a specific immutable commit for review.
+    A maintainer can submit a specific immutable Git commit for review.
 
     During review, GenLayer validators independently:
 
@@ -46,9 +45,11 @@ class OpenSourceComplianceGate(gl.Contract):
     READY_FOR_REVIEW
 
     The repository URL and project policy remain fixed after deployment.
-    Each release is identified by an immutable Git commit SHA.
-    """
 
+    Each release is identified by a complete 40-character hexadecimal
+    Git commit object ID. Branch names, tags, abbreviated SHAs and
+    other mutable identifiers are rejected.
+    """
 
     # ==============================================================
     # Persistent state
@@ -74,7 +75,6 @@ class OpenSourceComplianceGate(gl.Contract):
 
     review_count: u32
     last_reviewed_commit: str
-
 
     # ==============================================================
     # Constructor
@@ -122,7 +122,7 @@ class OpenSourceComplianceGate(gl.Contract):
         self.current_status = "READY_FOR_REVIEW"
         self.has_resolved = False
 
-        self.compliance_score = 0
+        self.compliance_score = u32(0)
 
         self.detected_license = ""
         self.license_risk = ""
@@ -133,9 +133,8 @@ class OpenSourceComplianceGate(gl.Contract):
 
         self.decision_summary = ""
 
-        self.review_count = 0
+        self.review_count = u32(0)
         self.last_reviewed_commit = ""
-
 
     # ==============================================================
     # Authorization
@@ -159,6 +158,43 @@ class OpenSourceComplianceGate(gl.Contract):
                 "Only the registered maintainer can perform this action."
             )
 
+    # ==============================================================
+    # Git commit validation
+    # ==============================================================
+
+    def _validate_commit_sha(
+        self,
+        source_commit: str
+    ) -> str:
+        """
+        Validate and normalize a complete Git commit object ID.
+
+        Requirements:
+
+            - Exactly 40 characters.
+            - Hexadecimal characters only.
+            - Branch names are rejected.
+            - Tags are rejected.
+            - Abbreviated commit SHAs are rejected.
+
+        Returns:
+            Normalized lowercase 40-character commit SHA.
+        """
+
+        commit = source_commit.strip().lower()
+
+        if len(commit) != 40:
+            raise gl.vm.UserError(
+                "Source commit must be a full 40-character Git commit SHA."
+            )
+
+        for character in commit:
+            if character not in "0123456789abcdef":
+                raise gl.vm.UserError(
+                    "Source commit must contain only hexadecimal characters."
+                )
+
+        return commit
 
     # ==============================================================
     # GitHub URL construction
@@ -209,7 +245,6 @@ class OpenSourceComplianceGate(gl.Contract):
             + path
         )
 
-
     # ==============================================================
     # Release submission
     # ==============================================================
@@ -225,8 +260,10 @@ class OpenSourceComplianceGate(gl.Contract):
 
         Only the registered maintainer may submit a release.
 
-        The commit SHA is stored before the review begins so that all
-        validators evaluate the same repository version.
+        The source_commit must be the complete 40-character hexadecimal
+        Git commit object ID.
+
+        Mutable identifiers such as branch names and tags are rejected.
         """
 
         self._require_maintainer()
@@ -246,12 +283,17 @@ class OpenSourceComplianceGate(gl.Contract):
                 "Source commit cannot be empty."
             )
 
-        commit = source_commit.strip()
+        # ----------------------------------------------------------
+        # Strict immutable Git commit validation
+        # ----------------------------------------------------------
 
-        if len(commit) < 7:
-            raise gl.vm.UserError(
-                "Source commit must contain a valid commit identifier."
-            )
+        commit = self._validate_commit_sha(
+            source_commit
+        )
+
+        # ----------------------------------------------------------
+        # Store validated release
+        # ----------------------------------------------------------
 
         self.current_release = release_label.strip()
         self.current_commit = commit
@@ -259,13 +301,14 @@ class OpenSourceComplianceGate(gl.Contract):
         self.current_status = "UNDER_REVIEW"
         self.has_resolved = False
 
-        self.compliance_score = 0
+        self.compliance_score = u32(0)
 
         self.detected_license = ""
         self.license_risk = ""
 
         self.evidence_summary = (
-            "Release submitted for source-grounded compliance review."
+            "Release submitted for source-grounded compliance review "
+            "against a validated immutable Git commit."
         )
 
         self.decision_summary = ""
@@ -273,9 +316,9 @@ class OpenSourceComplianceGate(gl.Contract):
         return {
             "status": self.current_status,
             "release": self.current_release,
-            "commit": self.current_commit
+            "commit": self.current_commit,
+            "commit_format": "FULL_40_CHARACTER_HEX_SHA"
         }
-
 
     # ==============================================================
     # Source retrieval and analysis
@@ -292,9 +335,7 @@ class OpenSourceComplianceGate(gl.Contract):
         Retrieve pinned repository evidence and perform the
         non-deterministic compliance analysis.
 
-        This function is intentionally self-contained so that
-        validators can independently reproduce the evidence
-        retrieval and reasoning process.
+        Validators independently execute this same process.
         """
 
         # ----------------------------------------------------------
@@ -319,9 +360,13 @@ class OpenSourceComplianceGate(gl.Contract):
             )
 
             try:
+
                 response = gl.nondet.web.get(url)
 
-                if response.status_code == 200:
+                if (
+                    response.status_code >= 200
+                    and response.status_code < 300
+                ):
 
                     body = response.body.decode(
                         "utf-8"
@@ -338,7 +383,6 @@ class OpenSourceComplianceGate(gl.Contract):
 
             except Exception:
                 pass
-
 
         # ----------------------------------------------------------
         # Supporting project metadata
@@ -362,9 +406,13 @@ class OpenSourceComplianceGate(gl.Contract):
             )
 
             try:
+
                 response = gl.nondet.web.get(url)
 
-                if response.status_code == 200:
+                if (
+                    response.status_code >= 200
+                    and response.status_code < 300
+                ):
 
                     body = response.body.decode(
                         "utf-8"
@@ -381,7 +429,6 @@ class OpenSourceComplianceGate(gl.Contract):
 
             except Exception:
                 pass
-
 
         # ----------------------------------------------------------
         # No license evidence
@@ -401,7 +448,6 @@ class OpenSourceComplianceGate(gl.Contract):
                 )
             }
 
-
         license_text = (
             "\n\n--- LICENSE FILE ---\n"
             .join(license_evidence)
@@ -411,7 +457,6 @@ class OpenSourceComplianceGate(gl.Contract):
             "\n\n--- PROJECT METADATA ---\n"
             .join(metadata_evidence)
         )
-
 
         # ----------------------------------------------------------
         # Source-grounded AI analysis
@@ -521,9 +566,7 @@ Insufficient evidence or HUMAN_REVIEW.
 OUTPUT
 --------------------------------------------------
 
-Return ONLY valid JSON.
-
-Use exactly this structure:
+Return ONLY a JSON object with exactly these fields:
 
 {{
     "decision": "COMPLIANT",
@@ -554,25 +597,17 @@ The evidence_found field must be true or false.
 Do not include markdown.
 
 Do not include additional fields.
-
-Do not provide explanations outside the JSON object.
 """
+
+        # ----------------------------------------------------------
+        # LLM execution
+        # ----------------------------------------------------------
 
         try:
 
-            raw_result = gl.nondet.exec_prompt(
-                task
-            )
-
-            cleaned = (
-                raw_result
-                .replace("```json", "")
-                .replace("```", "")
-                .strip()
-            )
-
-            parsed = json.loads(
-                cleaned
+            parsed = gl.nondet.exec_prompt(
+                task,
+                response_format="json"
             )
 
         except Exception:
@@ -585,10 +620,9 @@ Do not provide explanations outside the JSON object.
                 "evidence_found": False,
                 "summary": (
                     "The compliance analysis could not be "
-                    "reliably parsed."
+                    "reliably executed."
                 )
             }
-
 
         # ----------------------------------------------------------
         # Validate returned structure
@@ -605,9 +639,10 @@ Do not provide explanations outside the JSON object.
                 "risk": "UNKNOWN",
                 "license": "UNDETERMINED",
                 "evidence_found": False,
-                "summary": "Invalid compliance analysis response."
+                "summary": (
+                    "Invalid compliance analysis response."
+                )
             }
-
 
         decision = parsed.get(
             "decision"
@@ -633,7 +668,6 @@ Do not provide explanations outside the JSON object.
             "summary"
         )
 
-
         # ----------------------------------------------------------
         # Normalize decision
         # ----------------------------------------------------------
@@ -645,7 +679,6 @@ Do not provide explanations outside the JSON object.
         ]:
 
             decision = "HUMAN_REVIEW"
-
 
         # ----------------------------------------------------------
         # Normalize risk
@@ -659,7 +692,6 @@ Do not provide explanations outside the JSON object.
         ]:
 
             risk = "UNKNOWN"
-
 
         # ----------------------------------------------------------
         # Normalize score
@@ -678,7 +710,6 @@ Do not provide explanations outside the JSON object.
         if score > 100:
             score = 100
 
-
         # ----------------------------------------------------------
         # Normalize evidence flag
         # ----------------------------------------------------------
@@ -690,7 +721,6 @@ Do not provide explanations outside the JSON object.
 
             evidence_found = False
 
-
         # ----------------------------------------------------------
         # Normalize license
         # ----------------------------------------------------------
@@ -701,7 +731,6 @@ Do not provide explanations outside the JSON object.
         ):
 
             license_name = "UNDETERMINED"
-
 
         # ----------------------------------------------------------
         # Normalize summary
@@ -715,7 +744,6 @@ Do not provide explanations outside the JSON object.
             summary = (
                 "No reliable compliance summary available."
             )
-
 
         # ----------------------------------------------------------
         # Conservative evidence rule
@@ -735,7 +763,6 @@ Do not provide explanations outside the JSON object.
 
             license_name = "UNDETERMINED"
 
-
         return {
             "decision": decision,
             "score": score,
@@ -744,7 +771,6 @@ Do not provide explanations outside the JSON object.
             "evidence_found": evidence_found,
             "summary": summary[:2000]
         }
-
 
     # ==============================================================
     # Review release
@@ -760,8 +786,7 @@ Do not provide explanations outside the JSON object.
         Each validator independently retrieves the same pinned
         repository evidence and evaluates it.
 
-        GenLayer consensus requires substantive agreement on the
-        compliance decision and evidence classification.
+        Validators must agree on the substantive compliance result.
         """
 
         self._require_maintainer()
@@ -772,12 +797,10 @@ Do not provide explanations outside the JSON object.
                 "No release is currently awaiting compliance review."
             )
 
-
         repository = self.repository_url
         commit = self.current_commit
         policy = self.project_license_policy
         release = self.current_release
-
 
         # ----------------------------------------------------------
         # Leader evaluation
@@ -791,7 +814,6 @@ Do not provide explanations outside the JSON object.
                 policy,
                 release
             )
-
 
         # ----------------------------------------------------------
         # Validator verification
@@ -830,6 +852,23 @@ Do not provide explanations outside the JSON object.
 
                 return False
 
+            # ------------------------------------------------------
+            # Validate leader result structure
+            # ------------------------------------------------------
+
+            if not isinstance(
+                leader_data,
+                dict
+            ):
+
+                return False
+
+            if not isinstance(
+                validator_data,
+                dict
+            ):
+
+                return False
 
             # ------------------------------------------------------
             # Validate decision
@@ -842,7 +881,6 @@ Do not provide explanations outside the JSON object.
 
                 return False
 
-
             # ------------------------------------------------------
             # Validate evidence availability
             # ------------------------------------------------------
@@ -854,7 +892,6 @@ Do not provide explanations outside the JSON object.
 
                 return False
 
-
             # ------------------------------------------------------
             # Validate risk classification
             # ------------------------------------------------------
@@ -865,7 +902,6 @@ Do not provide explanations outside the JSON object.
             ):
 
                 return False
-
 
             # ------------------------------------------------------
             # Validate normalized license identity
@@ -892,9 +928,8 @@ Do not provide explanations outside the JSON object.
 
                 return False
 
-
             # ------------------------------------------------------
-            # Validate score within reasonable tolerance
+            # Validate score
             # ------------------------------------------------------
 
             try:
@@ -917,7 +952,7 @@ Do not provide explanations outside the JSON object.
 
                 return False
 
-
+            # Allow moderate LLM scoring variation.
             if abs(
                 leader_score
                 - validator_score
@@ -925,9 +960,7 @@ Do not provide explanations outside the JSON object.
 
                 return False
 
-
             return True
-
 
         # ----------------------------------------------------------
         # GenLayer non-deterministic consensus
@@ -937,7 +970,6 @@ Do not provide explanations outside the JSON object.
             leader_evaluation,
             validator_fn
         )
-
 
         # ----------------------------------------------------------
         # Read consensus result
@@ -972,7 +1004,6 @@ Do not provide explanations outside the JSON object.
             "No summary available."
         )
 
-
         # ----------------------------------------------------------
         # Defensive normalization
         # ----------------------------------------------------------
@@ -984,7 +1015,6 @@ Do not provide explanations outside the JSON object.
         ]:
 
             decision = "HUMAN_REVIEW"
-
 
         if not isinstance(
             score,
@@ -999,7 +1029,6 @@ Do not provide explanations outside the JSON object.
         if score > 100:
             score = 100
 
-
         if risk not in [
             "LOW",
             "MEDIUM",
@@ -1009,14 +1038,12 @@ Do not provide explanations outside the JSON object.
 
             risk = "UNKNOWN"
 
-
         if not isinstance(
             license_name,
             str
         ):
 
             license_name = "UNDETERMINED"
-
 
         if not isinstance(
             evidence_found,
@@ -1025,14 +1052,14 @@ Do not provide explanations outside the JSON object.
 
             evidence_found = False
 
-
         if not isinstance(
             summary,
             str
         ):
 
-            summary = "No reliable summary available."
-
+            summary = (
+                "No reliable summary available."
+            )
 
         # ----------------------------------------------------------
         # Conservative final rule
@@ -1044,7 +1071,6 @@ Do not provide explanations outside the JSON object.
             score = 0
             risk = "UNKNOWN"
             license_name = "UNDETERMINED"
-
 
         # ----------------------------------------------------------
         # Persist review evidence
@@ -1086,7 +1112,6 @@ Do not provide explanations outside the JSON object.
             self.current_commit
         )
 
-
         # ----------------------------------------------------------
         # Deterministic state transition
         # ----------------------------------------------------------
@@ -1099,7 +1124,6 @@ Do not provide explanations outside the JSON object.
 
             self.has_resolved = True
 
-
         elif decision == "NON_COMPLIANT":
 
             self.current_status = (
@@ -1108,7 +1132,6 @@ Do not provide explanations outside the JSON object.
 
             self.has_resolved = True
 
-
         else:
 
             self.current_status = (
@@ -1116,7 +1139,6 @@ Do not provide explanations outside the JSON object.
             )
 
             self.has_resolved = False
-
 
         return {
             "decision": decision,
@@ -1129,7 +1151,6 @@ Do not provide explanations outside the JSON object.
             "release": self.current_release,
             "commit": self.current_commit
         }
-
 
     # ==============================================================
     # Reset / retry
@@ -1157,7 +1178,6 @@ Do not provide explanations outside the JSON object.
                 "Cannot reset while a compliance review is active."
             )
 
-
         if self.current_status not in [
             "COMPLIANT",
             "NON_COMPLIANT",
@@ -1168,7 +1188,6 @@ Do not provide explanations outside the JSON object.
                 "The registry is already ready for a new release."
             )
 
-
         self.current_status = (
             "READY_FOR_REVIEW"
         )
@@ -1178,7 +1197,7 @@ Do not provide explanations outside the JSON object.
         self.current_release = ""
         self.current_commit = ""
 
-        self.compliance_score = 0
+        self.compliance_score = u32(0)
 
         self.detected_license = ""
         self.license_risk = ""
@@ -1189,7 +1208,6 @@ Do not provide explanations outside the JSON object.
 
         self.decision_summary = ""
 
-
         return {
             "status": self.current_status,
             "message": (
@@ -1197,7 +1215,6 @@ Do not provide explanations outside the JSON object.
                 "The maintainer can submit another pinned release."
             )
         }
-
 
     # ==============================================================
     # Public registry state
@@ -1232,7 +1249,6 @@ Do not provide explanations outside the JSON object.
             "review_count": self.review_count,
             "last_reviewed_commit": self.last_reviewed_commit
         }
-
 
     # ==============================================================
     # Latest compliance result
